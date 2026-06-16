@@ -578,7 +578,7 @@ footer a:hover{color:var(--purple-light)}
 </footer>
 
 <script>
-const CONTRACT_ADDR=''; // fill after deploy
+const CONTRACT_ADDR='0xFc6874768B6cAF8CAD6CD937A476454D53062890'; // fill after deploy
 const RPC='https://rpc-bradbury.genlayer.com';
 const CHAIN_ID='0x107D';
 const NET={chainId:CHAIN_ID,chainName:'GenLayer Bradbury',rpcUrls:[RPC],nativeCurrency:{name:'GEN',symbol:'GEN',decimals:18},blockExplorerUrls:['https://explorer-bradbury.genlayer.com']};
