@@ -6,16 +6,15 @@ from genlayer import *
 class ProjectLibrary(gl.Contract):
     """
     On-chain library of GenLayer ecosystem projects.
-    Anyone can submit a project. The AI auto-categorises,
-    summarises, and scores it by fetching the live URL.
-    Community can upvote. Owner can feature/remove.
+    Anyone can submit. AI auto-categorises, summarises, and scores
+    by fetching the live URL. Community can upvote. Owner can feature/remove.
+    Upgraded: TreeMap storage, web.get(), validate-only criteria.
     """
 
-    # ── Storage ──────────────────────────────────────────────
-    projects_json:  str   # {id: {name,desc,url,github,...}}
-    project_count:  u64
-    votes_json:     str   # {project_id: [address,...]}
-    owner:          str
+    projects:      TreeMap[str, str]   # project_id -> json(project)
+    votes:         TreeMap[str, str]   # project_id -> json([addr, ...])
+    project_count: u64
+    owner:         str
 
     CATEGORIES = [
         "DeFi", "Gaming", "NFT", "DAO", "Identity",
@@ -25,27 +24,39 @@ class ProjectLibrary(gl.Contract):
 
     def __init__(self):
         self.owner         = str(gl.message.sender_address).lower().strip()
-        self.projects_json = "{}"
-        self.votes_json    = "{}"
         self.project_count = u64(0)
 
     # ── Helpers ──────────────────────────────────────────────
-    def _projects(self)  -> dict: return json.loads(self.projects_json)
-    def _votes(self)     -> dict: return json.loads(self.votes_json)
-    def _addr(self)      -> str:  return str(gl.message.sender_address).lower().strip()
-    def _save_projects(self, d):  self.projects_json = json.dumps(d)
-    def _save_votes(self, d):     self.votes_json    = json.dumps(d)
+    def _addr(self) -> str: return str(gl.message.sender_address).lower().strip()
+
+    def _get_project(self, pid: str) -> dict:
+        raw = self.projects.get(pid, None)
+        if raw is None:
+            raise Exception("Project not found")
+        return json.loads(raw)
+
+    def _save_project(self, pid: str, p: dict):
+        self.projects[pid] = json.dumps(p)
+
+    def _get_votes(self, pid: str) -> list:
+        raw = self.votes.get(pid, None)
+        if raw is None:
+            return []
+        return json.loads(raw)
+
+    def _save_votes(self, pid: str, v: list):
+        self.votes[pid] = json.dumps(v)
 
     # ── Views ─────────────────────────────────────────────────
 
     @gl.public.view
     def get_project(self, project_id: int) -> str:
-        projects = self._projects()
-        p = projects.get(str(project_id))
-        if not p:
+        pid = str(project_id)
+        raw = self.projects.get(pid, None)
+        if raw is None:
             return "NOT_FOUND"
-        votes = self._votes()
-        p["votes"] = len(votes.get(str(project_id), []))
+        p = json.loads(raw)
+        p["votes"] = len(self._get_votes(pid))
         return json.dumps(p)
 
     @gl.public.view
@@ -53,14 +64,15 @@ class ProjectLibrary(gl.Contract):
         count = int(self.project_count)
         if count == 0:
             return "[]"
-        projects = self._projects()
-        votes    = self._votes()
-        result   = []
+        result = []
         for i in range(count):
-            p = projects.get(str(i))
-            if p:
-                p["votes"] = len(votes.get(str(i), []))
-                result.append(p)
+            pid = str(i)
+            raw = self.projects.get(pid, None)
+            if raw is None:
+                continue
+            p = json.loads(raw)
+            p["votes"] = len(self._get_votes(pid))
+            result.append(p)
         return json.dumps(result)
 
     @gl.public.view
@@ -73,9 +85,8 @@ class ProjectLibrary(gl.Contract):
 
     @gl.public.view
     def has_voted(self, project_id: int, address: str) -> str:
-        votes = self._votes()
-        addr  = address.lower().strip()
-        return str(addr in votes.get(str(project_id), []))
+        addr = address.lower().strip()
+        return str(addr in self._get_votes(str(project_id)))
 
     # ── Writes ────────────────────────────────────────────────
 
@@ -83,9 +94,8 @@ class ProjectLibrary(gl.Contract):
     def submit_project(self, name: str, description: str,
                        url: str, github: str, contract_addr: str):
         """
-        Submit a project to the library. AI fetches the URL,
-        auto-categorises it, writes a one-line summary, and
-        gives it an innovation score (1-10).
+        Submit a project. AI fetches the URL, auto-categorises,
+        writes a one-line summary, and gives an innovation score (1-10).
         """
         name        = name.strip()
         description = description.strip()
@@ -104,12 +114,11 @@ class ProjectLibrary(gl.Contract):
         cats_str  = ", ".join(self.CATEGORIES)
 
         def analyse_project():
-            # Fetch the project URL for context (optional — skip if blank)
             context = ""
             if url and url.startswith("http"):
                 try:
-                    raw = gl.nondet.web.render(url, mode="text")
-                    context = raw[:2000]
+                    response = gl.nondet.web.get(url)
+                    context  = response.body.decode("utf-8", errors="replace")[:2000]
                 except Exception:
                     context = ""
 
@@ -150,14 +159,14 @@ class ProjectLibrary(gl.Contract):
         raw = gl.eq_principle.prompt_non_comparative(
             analyse_project,
             task=(
-                "Analyse a GenLayer project submission and return a JSON "
+                "Analyse a GenLayer project submission and return JSON "
                 "with category, summary, score (1-10), and tags."
             ),
             criteria=(
-                "Valid JSON with 'category' (from the provided list), "
-                "'summary' (string ≤120 chars), 'score' (integer 1-10), "
-                "and 'tags' (list of up to 5 short strings). "
-                "Score and category must be realistic for the project described."
+                "Validate format only - do NOT evaluate quality. "
+                "Accept if: (1) valid JSON object, (2) 'category' is one of the "
+                "provided categories, (3) 'summary' is a non-empty string ≤120 chars, "
+                "(4) 'score' is an integer 1-10, (5) 'tags' is a list of strings."
             ),
         )
 
@@ -166,8 +175,7 @@ class ProjectLibrary(gl.Contract):
         except Exception:
             ai = {"category": "Other", "summary": description[:120], "score": 5, "tags": []}
 
-        projects = self._projects()
-        projects[str(pid)] = {
+        self._save_project(str(pid), {
             "id":            pid,
             "name":          name,
             "description":   description,
@@ -181,52 +189,44 @@ class ProjectLibrary(gl.Contract):
             "tags":          ai.get("tags", []),
             "featured":      False,
             "removed":       False,
-        }
-        self._save_projects(projects)
+        })
         self.project_count = u64(pid + 1)
 
     @gl.public.write
     def upvote(self, project_id: int):
         """Toggle upvote — call once to vote, again to unvote."""
-        projects = self._projects()
-        pid      = str(project_id)
-        if pid not in projects:
+        pid = str(project_id)
+        raw = self.projects.get(pid, None)
+        if raw is None:
             raise Exception("Project not found")
-        if projects[pid].get("removed"):
+        p = json.loads(raw)
+        if p.get("removed"):
             raise Exception("Project has been removed")
 
         addr  = self._addr()
-        votes = self._votes()
-        if pid not in votes:
-            votes[pid] = []
-
-        if addr in votes[pid]:
-            votes[pid].remove(addr)
+        v     = self._get_votes(pid)
+        if addr in v:
+            v.remove(addr)
         else:
-            votes[pid].append(addr)
-
-        self._save_votes(votes)
+            v.append(addr)
+        self._save_votes(pid, v)
 
     @gl.public.write
     def feature_project(self, project_id: int, featured: bool):
         """Owner only — mark a project as featured."""
         if self._addr() != self.owner:
             raise Exception("Owner only")
-        projects = self._projects()
-        pid      = str(project_id)
-        if pid not in projects:
-            raise Exception("Project not found")
-        projects[pid]["featured"] = featured
-        self._save_projects(projects)
+        pid = str(project_id)
+        p   = self._get_project(pid)
+        p["featured"] = featured
+        self._save_project(pid, p)
 
     @gl.public.write
     def remove_project(self, project_id: int):
         """Owner only — soft-remove a project."""
         if self._addr() != self.owner:
             raise Exception("Owner only")
-        projects = self._projects()
-        pid      = str(project_id)
-        if pid not in projects:
-            raise Exception("Project not found")
-        projects[pid]["removed"] = True
-        self._save_projects(projects)
+        pid = str(project_id)
+        p   = self._get_project(pid)
+        p["removed"] = True
+        self._save_project(pid, p)
