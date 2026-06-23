@@ -579,7 +579,7 @@ footer a:hover{color:var(--purple-light)}
 </footer>
 
 <script>
-const CONTRACT_ADDR='0xFc6874768B6cAF8CAD6CD937A476454D53062890';
+const CONTRACT_ADDR='0x95C2b4F37f269547f55680B45C47Cd500454c221';
 const RPC='https://rpc-bradbury.genlayer.com';
 const CHAIN_ID='0x107D';
 const NET={chainId:CHAIN_ID,chainName:'GenLayer Bradbury',rpcUrls:[RPC],nativeCurrency:{name:'GEN',symbol:'GEN',decimals:18},blockExplorerUrls:['https://explorer-bradbury.genlayer.com']};
@@ -690,13 +690,22 @@ function encodeCalldataMsgpack(method, args=[], leaderOnly=false) {
   return '0x' + Array.from(rlp).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 
+// Plain GL encoding for gen_call reads — NO RLP wrapper
+function encodeForRead(method, args=[]) {
+  const obj = {};
+  if (method) obj.method = method;
+  if (args && args.length > 0) obj.args = args;
+  const encoded = _glEncode(obj);
+  return '0x' + Array.from(encoded).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
 // ── RPC ───────────────────────────────────────────────────────
 async function rpcPost(method,params=[]){const r=await fetch(RPC,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});const d=await r.json();if(d.error)throw new Error(d.error.message);return d.result;}
 
 async function readContract(method,args=[]){
   if(!CONTRACT_ADDR) return '';
   const from = S.account || '0x0000000000000000000000000000000000000000';
-  const data = encodeCalldataMsgpack(method, args, false);
+  const data = encodeForRead(method, args);
   try {
     const result = await rpcPost('gen_call', [{
       to: CONTRACT_ADDR, from, Data: data, Type: 'read', gas: '0x7A120', value: '0x0'
@@ -727,7 +736,7 @@ async function readContract(method,args=[]){
 
 async function writeContract(method,args=[]){
   const cd = encodeCalldataMsgpack(method, args, false);
-  const CONS='0x4F33a39DC5Ac7c5B9F2E7aB137F7c50b8f9B9339';
+  const CONS='0x0112Bf6e83497965A5fdD6Dad1E447a6E004271D';
   const pad=v=>v.toString(16).padStart(64,'0');
   const padA=a=>a.toLowerCase().replace('0x','').padStart(64,'0');
   const ch = cd.startsWith('0x') ? cd.slice(2) : cd;
@@ -735,7 +744,19 @@ async function writeContract(method,args=[]){
   return window.ethereum.request({method:'eth_sendTransaction',params:[{from:S.account,to:CONS,data:txData,gas:'0x493E0'}]});
 }
 
-async function waitTx(hash,tries=30){for(let i=0;i<tries;i++){await new Promise(r=>setTimeout(r,3000));if(i===9)toast('Still finalizing — Bradbury can take 1-3 min. Keep this tab open.','ok',10000);try{const r=await rpcPost('eth_getTransactionReceipt',[hash]);if(r){if(r.status==='0x1'||r.status===1)return;throw new Error('Transaction rejected by contract');}}catch(e){if(e.message.startsWith('Trans'))throw e;}}throw new Error('Timeout — check explorer-bradbury.genlayer.com');}
+async function waitTx(hash,tries=30){
+  for(let i=0;i<tries;i++){
+    await new Promise(r=>setTimeout(r,3000));
+    if(i===9)toast('Still finalizing — Bradbury can take 1-3 min. Keep this tab open.','ok',10000);
+    try{
+      const r=await rpcPost('gen_getTransactionStatus',[hash]);
+      const st=(typeof r==='string'?r:r?.result||'').toUpperCase();
+      if(st==='ACCEPTED'||st==='FINALIZED')return;
+      if(st==='CANCELED'||st==='UNDETERMINED')throw new Error('Transaction '+st);
+    }catch(e){if(e.message.includes('CANCELED')||e.message.includes('UNDETERMINED'))throw e;}
+  }
+  throw new Error('Timeout — check explorer-bradbury.genlayer.com');
+}
 
 
 // ── Load ─────────────────────────────────────────────────────
