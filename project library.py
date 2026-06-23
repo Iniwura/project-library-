@@ -25,6 +25,8 @@ class ProjectLibrary(gl.Contract):
     def __init__(self):
         self.owner         = str(gl.message.sender_address).lower().strip()
         self.project_count = u64(0)
+        root = gl.storage.Root.get()
+        root.upgraders.get().append(gl.message.sender_address)
 
     # ── Helpers ──────────────────────────────────────────────
     def _addr(self) -> str: return str(gl.message.sender_address).lower().strip()
@@ -89,6 +91,14 @@ class ProjectLibrary(gl.Contract):
         return str(addr in self._get_votes(str(project_id)))
 
     # ── Writes ────────────────────────────────────────────────
+
+    @gl.public.write
+    def upgrade(self, new_code: bytes) -> None:
+        """Push a new version without changing the contract address. Deployer only."""
+        root = gl.storage.Root.get()
+        code = root.code.get()
+        code.truncate()
+        code.extend(new_code)
 
     @gl.public.write
     def submit_project(self, name: str, description: str,
