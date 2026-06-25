@@ -579,7 +579,7 @@ footer a:hover{color:var(--purple-light)}
 </footer>
 
 <script>
-const CONTRACT_ADDR='0x95C2b4F37f269547f55680B45C47Cd500454c221';
+const CONTRACT_ADDR='0x08716438f4f13c2d01A79A481dB9e123457868B3';
 const RPC='https://rpc-bradbury.genlayer.com';
 const CHAIN_ID='0x107D';
 const NET={chainId:CHAIN_ID,chainName:'GenLayer Bradbury',rpcUrls:[RPC],nativeCurrency:{name:'GEN',symbol:'GEN',decimals:18},blockExplorerUrls:['https://explorer-bradbury.genlayer.com']};
@@ -690,49 +690,73 @@ function encodeCalldataMsgpack(method, args=[], leaderOnly=false) {
   return '0x' + Array.from(rlp).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 
-// Plain GL encoding for gen_call reads — NO RLP wrapper
 function encodeForRead(method, args=[]) {
-  const obj = {};
-  if (method) obj.method = method;
-  if (args && args.length > 0) obj.args = args;
-  const encoded = _glEncode(obj);
-  return '0x' + Array.from(encoded).map(b=>b.toString(16).padStart(2,'0')).join('');
+  function encVal(v) {
+    if(v===null||v===undefined) return {_glEncode:'null',value:null};
+    if(typeof v==='boolean')    return {_glEncode:'bool',value:v};
+    if(typeof v==='number')     return {_glEncode:'int',value:v};
+    if(typeof v==='bigint')     return {_glEncode:'int',value:Number(v)};
+    if(typeof v==='string')     return {_glEncode:'str',value:v};
+    if(Array.isArray(v))        return {_glEncode:'list',value:v.map(encVal)};
+    return {_glEncode:'dict',value:Object.fromEntries(Object.entries(v).map(([k,vv])=>[k,encVal(vv)]))};
+  }
+  const obj = {method, args: args.map(encVal)};
+  const buf = new TextEncoder().encode(JSON.stringify(obj));
+  return '0x'+Array.from(buf).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 
 // ── RPC ───────────────────────────────────────────────────────
 async function rpcPost(method,params=[]){const r=await fetch(RPC,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});const d=await r.json();if(d.error)throw new Error(d.error.message);return d.result;}
 
-async function readContract(method,args=[]){
+function glDecode(hexStr) {
+  const hex   = hexStr.startsWith('0x') ? hexStr.slice(2) : hexStr;
+  if (!hex || hex.length === 0) return null;
+  const bytes = new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b,16)));
+  const idx   = {i:0};
+  function uleb() {
+    let res=0n,acc=0n,go=true;
+    while(go){const b=bytes[idx.i++];res+=BigInt(b&127)*(1n<<acc);acc+=7n;go=b>=128;}
+    return res;
+  }
+  function dec() {
+    const cur=uleb();
+    if(cur===0n)return null;
+    if(cur===16n)return true;
+    if(cur===8n)return false;
+    const type=Number(cur&7n), rest=cur>>3n;
+    if(type===4){const n=Number(rest),r=bytes.slice(idx.i,idx.i+n);idx.i+=n;return new TextDecoder().decode(r);}
+    if(type===1)return Number(rest);
+    if(type===2)return -1-Number(rest);
+    if(type===3){const n=Number(rest),r=bytes.slice(idx.i,idx.i+n);idx.i+=n;return r;}
+    if(type===5){const r=[];let e=Number(rest);while(e-->0)r.push(dec());return r;}
+    if(type===6){const r={};let e=Number(rest);while(e-->0){const kl=Number(uleb()),kb=bytes.slice(idx.i,idx.i+kl);idx.i+=kl;r[new TextDecoder().decode(kb)]=dec();}return r;}
+    throw new Error('unknown gl type '+type);
+  }
+  const res = dec();
+  if(typeof res==='string') return res;
+  if(res===null||res===undefined) return null;
+  return JSON.stringify(res);
+}
+
+async function readContract(method, args=[]) {
   if(!CONTRACT_ADDR) return '';
   const from = S.account || '0x0000000000000000000000000000000000000000';
-  const data = encodeForRead(method, args);
+  const data = encodeCalldataMsgpack(method, args, false);
   try {
     const result = await rpcPost('gen_call', [{
-      to: CONTRACT_ADDR, from, Data: data, Type: 'read', gas: '0x7A120', value: '0x0'
+      type: 'read',
+      from: from,
+      to:   CONTRACT_ADDR,
+      data: data,
+      transaction_hash_variant: 'latest-nonfinal'
     }]);
-    if (!result || result.error) return '';
-    const raw = typeof result==='string' ? result
-      : result.data||result.output||result.result||result.return_value;
-    if (raw && typeof raw==='string' && raw.length>0) {
-      const hex = raw.startsWith('0x') ? raw.slice(2) : raw;
-      try {
-        const bytes = new Uint8Array(hex.match(/.{1,2}/g).map(b=>parseInt(b,16)));
-        let pos=0, varint=0, shift=0;
-        while (pos < bytes.length) {
-          const b = bytes[pos++];
-          varint |= (b & 0x7f) << shift;
-          shift += 7;
-          if (!(b & 0x80)) break;
-        }
-        const typ = varint & 7;
-        const len = varint >> 3;
-        if (typ===4 && pos+len<=bytes.length) return new TextDecoder().decode(bytes.slice(pos, pos+len));
-        return new TextDecoder().decode(bytes);
-      } catch {}
-    }
-    return raw ? String(raw) : '';
-  } catch(e) { return ''; }
+    if (!result) return null;
+    const hex = typeof result === 'string' ? result : result.data;
+    if (!hex) return null;
+    return glDecode(hex);
+  } catch(e) { return null; }
 }
+
 
 async function writeContract(method,args=[]){
   const cd = encodeCalldataMsgpack(method, args, false);
@@ -773,7 +797,6 @@ async function load(){
   }catch(e){
     $('pgrid').innerHTML=`<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-title">${e.message}</div></div>`;
   }
-}
 
 function updateStats(){
   $('s-total').textContent=PROJECTS.length;
