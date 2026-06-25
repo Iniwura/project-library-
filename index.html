@@ -797,6 +797,7 @@ async function load(){
   }catch(e){
     $('pgrid').innerHTML=`<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-title">${e.message}</div></div>`;
   }
+}
 
 function updateStats(){
   $('s-total').textContent=PROJECTS.length;
